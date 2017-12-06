@@ -1,12 +1,14 @@
 package command
 
 import (
+	"context"
 	"fmt"
-	"log"
-	"os"
 	"strings"
 
-	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/errwrap"
+	"github.com/hashicorp/terraform/backend"
+	"github.com/hashicorp/terraform/config"
+	"github.com/hashicorp/terraform/config/module"
 )
 
 // PlanCommand is a Command implementation that compares a Terraform
@@ -20,135 +22,138 @@ func (c *PlanCommand) Run(args []string) int {
 	var outPath string
 	var moduleDepth int
 
-	args = c.Meta.process(args, true)
+	args, err := c.Meta.process(args, true)
+	if err != nil {
+		return 1
+	}
 
 	cmdFlags := c.Meta.flagSet("plan")
 	cmdFlags.BoolVar(&destroy, "destroy", false, "destroy")
 	cmdFlags.BoolVar(&refresh, "refresh", true, "refresh")
 	c.addModuleDepthFlag(cmdFlags, &moduleDepth)
 	cmdFlags.StringVar(&outPath, "out", "", "path")
-	cmdFlags.StringVar(&c.Meta.statePath, "state", DefaultStateFilename, "path")
-	cmdFlags.StringVar(&c.Meta.backupPath, "backup", "", "path")
+	cmdFlags.IntVar(
+		&c.Meta.parallelism, "parallelism", DefaultParallelism, "parallelism")
+	cmdFlags.StringVar(&c.Meta.statePath, "state", "", "path")
 	cmdFlags.BoolVar(&detailed, "detailed-exitcode", false, "detailed-exitcode")
+	cmdFlags.BoolVar(&c.Meta.stateLock, "lock", true, "lock state")
+	cmdFlags.DurationVar(&c.Meta.stateLockTimeout, "lock-timeout", 0, "lock timeout")
 	cmdFlags.Usage = func() { c.Ui.Error(c.Help()) }
 	if err := cmdFlags.Parse(args); err != nil {
 		return 1
 	}
 
-	var path string
-	args = cmdFlags.Args()
-	if len(args) > 1 {
-		c.Ui.Error(
-			"The plan command expects at most one argument with the path\n" +
-				"to a Terraform configuration.\n")
-		cmdFlags.Usage()
-		return 1
-	} else if len(args) == 1 {
-		path = args[0]
-	} else {
-		var err error
-		path, err = os.Getwd()
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf("Error getting pwd: %s", err))
-		}
-	}
-
-	countHook := new(CountHook)
-	c.Meta.extraHooks = []terraform.Hook{countHook}
-
-	ctx, _, err := c.Context(contextOpts{
-		Destroy:   destroy,
-		Path:      path,
-		StatePath: c.Meta.statePath,
-	})
+	configPath, err := ModulePath(cmdFlags.Args())
 	if err != nil {
 		c.Ui.Error(err.Error())
 		return 1
 	}
-	if !validateContext(ctx, c.Ui) {
+
+	// Check for user-supplied plugin path
+	if c.pluginPath, err = c.loadPluginPath(); err != nil {
+		c.Ui.Error(fmt.Sprintf("Error loading plugin path: %s", err))
 		return 1
 	}
-	if err := ctx.Input(c.InputMode()); err != nil {
-		c.Ui.Error(fmt.Sprintf("Error configuring: %s", err))
-		return 1
-	}
 
-	if refresh {
-		c.Ui.Output("Refreshing Terraform state prior to plan...\n")
-		state, err := ctx.Refresh()
-		if err != nil {
-			c.Ui.Error(fmt.Sprintf("Error refreshing state: %s", err))
-			return 1
-		}
-		c.Ui.Output("")
-
-		if state != nil {
-			log.Printf("[INFO] Writing state output to: %s", c.Meta.StateOutPath())
-			if err := c.Meta.PersistState(state); err != nil {
-				c.Ui.Error(fmt.Sprintf("Error writing state file: %s", err))
-				return 1
-			}
-		}
-	}
-
-	plan, err := ctx.Plan()
+	// Check if the path is a plan
+	plan, err := c.Plan(configPath)
 	if err != nil {
-		c.Ui.Error(fmt.Sprintf("Error running plan: %s", err))
+		c.Ui.Error(err.Error())
 		return 1
 	}
+	if plan != nil {
+		// Disable refreshing no matter what since we only want to show the plan
+		refresh = false
 
-	if plan.Diff.Empty() {
-		c.Ui.Output(
-			"No changes. Infrastructure is up-to-date. This means that Terraform\n" +
-				"could not detect any differences between your configuration and\n" +
-				"the real physical resources that exist. As a result, Terraform\n" +
-				"doesn't need to do anything.")
-		return 0
+		// Set the config path to empty for backend loading
+		configPath = ""
 	}
 
-	if outPath != "" {
-		log.Printf("[INFO] Writing plan output to: %s", outPath)
-		f, err := os.Create(outPath)
-		if err == nil {
-			defer f.Close()
-			err = terraform.WritePlan(plan, f)
-		}
+	// Load the module if we don't have one yet (not running from plan)
+	var mod *module.Tree
+	if plan == nil {
+		mod, err = c.Module(configPath)
 		if err != nil {
-			c.Ui.Error(fmt.Sprintf("Error writing plan file: %s", err))
+			err = errwrap.Wrapf("Failed to load root config module: {{err}}", err)
+			c.showDiagnostics(err)
 			return 1
 		}
 	}
 
-	if outPath == "" {
-		c.Ui.Output(strings.TrimSpace(planHeaderNoOutput) + "\n")
-	} else {
-		c.Ui.Output(fmt.Sprintf(
-			strings.TrimSpace(planHeaderYesOutput)+"\n",
-			outPath))
+	var conf *config.Config
+	if mod != nil {
+		conf = mod.Config()
+	}
+	// Load the backend
+	b, err := c.Backend(&BackendOpts{
+		Config: conf,
+		Plan:   plan,
+	})
+	if err != nil {
+		c.Ui.Error(fmt.Sprintf("Failed to load backend: %s", err))
+		return 1
 	}
 
-	c.Ui.Output(FormatPlan(&FormatPlanOpts{
-		Plan:        plan,
-		Color:       c.Colorize(),
-		ModuleDepth: moduleDepth,
-	}))
+	// Build the operation
+	opReq := c.Operation()
+	opReq.Destroy = destroy
+	opReq.Module = mod
+	opReq.Plan = plan
+	opReq.PlanRefresh = refresh
+	opReq.PlanOutPath = outPath
+	opReq.Type = backend.OperationTypePlan
 
-	c.Ui.Output(c.Colorize().Color(fmt.Sprintf(
-		"[reset][bold]Plan:[reset] "+
-			"%d to add, %d to change, %d to destroy.",
-		countHook.ToAdd,
-		(countHook.ToChange + countHook.ToRemoveAndAdd),
-		countHook.ToRemove)))
+	// Perform the operation
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
 
-	if detailed {
+	op, err := b.Operation(ctx, opReq)
+	if err != nil {
+		c.Ui.Error(fmt.Sprintf("Error starting operation: %s", err))
+		return 1
+	}
+
+	select {
+	case <-c.ShutdownCh:
+		// Cancel our context so we can start gracefully exiting
+		ctxCancel()
+
+		// Notify the user
+		c.Ui.Output(outputInterrupt)
+
+		// Still get the result, since there is still one
+		select {
+		case <-c.ShutdownCh:
+			c.Ui.Error(
+				"Two interrupts received. Exiting immediately")
+			return 1
+		case <-op.Done():
+		}
+	case <-op.Done():
+		if err := op.Err; err != nil {
+			c.showDiagnostics(err)
+			return 1
+		}
+	}
+
+	/*
+		err = terraform.SetDebugInfo(DefaultDataDir)
+		if err != nil {
+			c.Ui.Error(err.Error())
+			return 1
+		}
+	*/
+
+	if detailed && !op.PlanEmpty {
 		return 2
 	}
+
 	return 0
 }
 
 func (c *PlanCommand) Help() string {
 	helpText := `
-Usage: terraform plan [options] [dir]
+Usage: terraform plan [options] [DIR-OR-PLAN]
 
   Generates an execution plan for Terraform.
 
@@ -157,11 +162,10 @@ Usage: terraform plan [options] [dir]
   a Terraform plan file, and apply can take this plan file to execute
   this plan exactly.
 
-Options:
+  If a saved plan is passed as an argument, this command will output
+  the saved plan contents. It will not modify the given plan.
 
-  -backup=path        Path to backup the existing state file before
-                      modifying. Defaults to the "-state-out" path with
-                      ".backup" extension. Set to "-" to disable backup.
+Options:
 
   -destroy            If set, a plan will be generated to destroy all resources
                       managed by the given configuration and state.
@@ -174,14 +178,20 @@ Options:
 
   -input=true         Ask for input for variables if not directly set.
 
+  -lock=true          Lock the state file when locking is supported.
+
+  -lock-timeout=0s    Duration to retry a state lock.
+
   -module-depth=n     Specifies the depth of modules to show in the output.
                       This does not affect the plan itself, only the output
-                      shown. By default, this is zero. -1 will expand all.
+                      shown. By default, this is -1, which will expand all.
 
   -no-color           If specified, output won't contain any color.
 
   -out=path           Write a plan file to the given path. This can be used as
                       input to the "apply" command.
+
+  -parallelism=n      Limit the number of concurrent operations. Defaults to 10.
 
   -refresh=true       Update state prior to checking for differences.
 
@@ -197,8 +207,8 @@ Options:
                       flag can be set multiple times.
 
   -var-file=foo       Set variables in the Terraform configuration from
-                      a file. If "terraform.tfvars" is present, it will be
-                      automatically loaded if this flag is not specified.
+                      a file. If "terraform.tfvars" or any ".auto.tfvars"
+                      files are present, they will be automatically loaded.
 `
 	return strings.TrimSpace(helpText)
 }
@@ -206,28 +216,3 @@ Options:
 func (c *PlanCommand) Synopsis() string {
 	return "Generate and show an execution plan"
 }
-
-const planHeaderNoOutput = `
-The Terraform execution plan has been generated and is shown below.
-Resources are shown in alphabetical order for quick scanning. Green resources
-will be created (or destroyed and then created if an existing resource
-exists), yellow resources are being changed in-place, and red resources
-will be destroyed.
-
-Note: You didn't specify an "-out" parameter to save this plan, so when
-"apply" is called, Terraform can't guarantee this is what will execute.
-`
-
-const planHeaderYesOutput = `
-The Terraform execution plan has been generated and is shown below.
-Resources are shown in alphabetical order for quick scanning. Green resources
-will be created (or destroyed and then created if an existing resource
-exists), yellow resources are being changed in-place, and red resources
-will be destroyed.
-
-Your plan was also saved to the path below. Call the "apply" subcommand
-with this plan file and Terraform will exactly execute this execution
-plan.
-
-Path: %s
-`

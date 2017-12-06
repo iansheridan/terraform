@@ -2,46 +2,119 @@ package command
 
 import (
 	"bufio"
+	"bytes"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/ioutil"
+	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
+	"strings"
+	"time"
 
+	"github.com/hashicorp/terraform/backend"
+	"github.com/hashicorp/terraform/backend/local"
+	"github.com/hashicorp/terraform/command/format"
+	"github.com/hashicorp/terraform/config"
 	"github.com/hashicorp/terraform/config/module"
-	"github.com/hashicorp/terraform/state"
+	"github.com/hashicorp/terraform/helper/experiment"
+	"github.com/hashicorp/terraform/helper/variables"
+	"github.com/hashicorp/terraform/helper/wrappedstreams"
+	"github.com/hashicorp/terraform/svchost/auth"
+	"github.com/hashicorp/terraform/svchost/disco"
 	"github.com/hashicorp/terraform/terraform"
+	"github.com/hashicorp/terraform/tfdiags"
 	"github.com/mitchellh/cli"
 	"github.com/mitchellh/colorstring"
 )
 
 // Meta are the meta-options that are available on all or most commands.
 type Meta struct {
-	Color       bool
-	ContextOpts *terraform.ContextOpts
-	Ui          cli.Ui
+	// The exported fields below should be set by anyone using a
+	// command with a Meta field. These are expected to be set externally
+	// (not from within the command itself).
 
-	// State read when calling `Context`. This is available after calling
-	// `Context`.
-	state       state.State
-	stateResult *StateResult
+	Color            bool             // True if output should be colored
+	GlobalPluginDirs []string         // Additional paths to search for plugins
+	PluginOverrides  *PluginOverrides // legacy overrides from .terraformrc file
+	Ui               cli.Ui           // Ui for output
 
-	// This can be set by the command itself to provide extra hooks.
-	extraHooks []terraform.Hook
+	// ExtraHooks are extra hooks to add to the context.
+	ExtraHooks []terraform.Hook
 
-	// This can be set by tests to change some directories
+	// Services provides access to remote endpoint information for
+	// "terraform-native' services running at a specific user-facing hostname.
+	Services *disco.Disco
+
+	// Credentials provides access to credentials for "terraform-native"
+	// services, which are accessed by a service hostname.
+	Credentials auth.CredentialsSource
+
+	// RunningInAutomation indicates that commands are being run by an
+	// automated system rather than directly at a command prompt.
+	//
+	// This is a hint to various command routines that it may be confusing
+	// to print out messages that suggest running specific follow-up
+	// commands, since the user consuming the output will not be
+	// in a position to run such commands.
+	//
+	// The intended use-case of this flag is when Terraform is running in
+	// some sort of workflow orchestration tool which is abstracting away
+	// the specific commands being run.
+	RunningInAutomation bool
+
+	// PluginCacheDir, if non-empty, enables caching of downloaded plugins
+	// into the given directory.
+	PluginCacheDir string
+
+	// OverrideDataDir, if non-empty, overrides the return value of the
+	// DataDir method for situations where the local .terraform/ directory
+	// is not suitable, e.g. because of a read-only filesystem.
+	OverrideDataDir string
+
+	// When this channel is closed, the command will be cancelled.
+	ShutdownCh <-chan struct{}
+
+	//----------------------------------------------------------
+	// Protected: commands can set these
+	//----------------------------------------------------------
+
+	// Modify the data directory location. This should be accessed through the
+	// DataDir method.
 	dataDir string
+
+	// pluginPath is a user defined set of directories to look for plugins.
+	// This is set during init with the `-plugin-dir` flag, saved to a file in
+	// the data directory.
+	// This overrides all other search paths when discovering plugins.
+	pluginPath []string
+
+	ignorePluginChecksum bool
+
+	// Override certain behavior for tests within this package
+	testingOverrides *testingOverrides
+
+	//----------------------------------------------------------
+	// Private: do not set these
+	//----------------------------------------------------------
+
+	// backendState is the currently active backend state
+	backendState *terraform.BackendState
 
 	// Variables for the context (private)
 	autoKey       string
-	autoVariables map[string]string
+	autoVariables map[string]interface{}
 	input         bool
-	variables     map[string]string
+	variables     map[string]interface{}
 
 	// Targets for this context (private)
 	targets []string
 
+	// Internal fields
 	color bool
 	oldUi cli.Ui
 
@@ -58,10 +131,54 @@ type Meta struct {
 	// be overriden.
 	//
 	// backupPath is used to backup the state file before writing a modified
-	// version. It defaults to stateOutPath + DefaultBackupExtention
-	statePath    string
-	stateOutPath string
-	backupPath   string
+	// version. It defaults to stateOutPath + DefaultBackupExtension
+	//
+	// parallelism is used to control the number of concurrent operations
+	// allowed when walking the graph
+	//
+	// shadow is used to enable/disable the shadow graph
+	//
+	// provider is to specify specific resource providers
+	//
+	// stateLock is set to false to disable state locking
+	//
+	// stateLockTimeout is the optional duration to retry a state locks locks
+	// when it is already locked by another process.
+	//
+	// forceInitCopy suppresses confirmation for copying state data during
+	// init.
+	//
+	// reconfigure forces init to ignore any stored configuration.
+	statePath        string
+	stateOutPath     string
+	backupPath       string
+	parallelism      int
+	shadow           bool
+	provider         string
+	stateLock        bool
+	stateLockTimeout time.Duration
+	forceInitCopy    bool
+	reconfigure      bool
+
+	// errWriter is the write side of a pipe for the FlagSet output. We need to
+	// keep track of this to close previous pipes between tests. Normal
+	// operation never needs to close this.
+	errWriter *io.PipeWriter
+	// done chan to wait for the scanner goroutine
+	errScannerDone chan struct{}
+
+	// Used with the import command to allow import of state when no matching config exists.
+	allowMissingConfig bool
+}
+
+type PluginOverrides struct {
+	Providers    map[string]string
+	Provisioners map[string]string
+}
+
+type testingOverrides struct {
+	ProviderResolver terraform.ResourceProviderResolver
+	Provisioners     map[string]terraform.ResourceProvisionerFactory
 }
 
 // initStatePaths is used to initialize the default values for
@@ -74,7 +191,7 @@ func (m *Meta) initStatePaths() {
 		m.stateOutPath = m.statePath
 	}
 	if m.backupPath == "" {
-		m.backupPath = m.stateOutPath + DefaultBackupExtention
+		m.backupPath = m.stateOutPath + DefaultBackupExtension
 	}
 }
 
@@ -92,78 +209,13 @@ func (m *Meta) Colorize() *colorstring.Colorize {
 	}
 }
 
-// Context returns a Terraform Context taking into account the context
-// options used to initialize this meta configuration.
-func (m *Meta) Context(copts contextOpts) (*terraform.Context, bool, error) {
-	opts := m.contextOpts()
-
-	// First try to just read the plan directly from the path given.
-	f, err := os.Open(copts.Path)
-	if err == nil {
-		plan, err := terraform.ReadPlan(f)
-		f.Close()
-		if err == nil {
-			// Setup our state
-			state, statePath, err := StateFromPlan(m.statePath, plan)
-			if err != nil {
-				return nil, false, fmt.Errorf("Error loading plan: %s", err)
-			}
-
-			// Set our state
-			m.state = state
-			m.stateOutPath = statePath
-
-			if len(m.variables) > 0 {
-				return nil, false, fmt.Errorf(
-					"You can't set variables with the '-var' or '-var-file' flag\n" +
-						"when you're applying a plan file. The variables used when\n" +
-						"the plan was created will be used. If you wish to use different\n" +
-						"variable values, create a new plan file.")
-			}
-
-			return plan.Context(opts), true, nil
-		}
-	}
-
-	// Load the statePath if not given
-	if copts.StatePath != "" {
-		m.statePath = copts.StatePath
-	}
-
-	// Tell the context if we're in a destroy plan / apply
-	opts.Destroy = copts.Destroy
-
-	// Store the loaded state
-	state, err := m.State()
-	if err != nil {
-		return nil, false, err
-	}
-
-	// Load the root module
-	mod, err := module.NewTreeModule("", copts.Path)
-	if err != nil {
-		return nil, false, fmt.Errorf("Error loading config: %s", err)
-	}
-
-	err = mod.Load(m.moduleStorage(m.DataDir()), copts.GetMode)
-	if err != nil {
-		return nil, false, fmt.Errorf("Error downloading modules: %s", err)
-	}
-
-	opts.Module = mod
-	opts.State = state.State()
-	ctx := terraform.NewContext(opts)
-	return ctx, false, nil
-}
-
 // DataDir returns the directory where local data will be stored.
+// Defaults to DefaultDataDir in the current working directory.
 func (m *Meta) DataDir() string {
-	dataDir := DefaultDataDirectory
-	if m.dataDir != "" {
-		dataDir = m.dataDir
+	if m.OverrideDataDir != "" {
+		return m.OverrideDataDir
 	}
-
-	return dataDir
+	return DefaultDataDir
 }
 
 const (
@@ -190,59 +242,10 @@ func (m *Meta) InputMode() terraform.InputMode {
 
 	var mode terraform.InputMode
 	mode |= terraform.InputModeProvider
-	if len(m.variables) == 0 {
-		mode |= terraform.InputModeVar
-		mode |= terraform.InputModeVarUnset
-	}
+	mode |= terraform.InputModeVar
+	mode |= terraform.InputModeVarUnset
 
 	return mode
-}
-
-// State returns the state for this meta.
-func (m *Meta) State() (state.State, error) {
-	if m.state != nil {
-		return m.state, nil
-	}
-
-	result, err := State(m.StateOpts())
-	if err != nil {
-		return nil, err
-	}
-
-	m.state = result.State
-	m.stateOutPath = result.StatePath
-	m.stateResult = result
-	return m.state, nil
-}
-
-// StateRaw is used to setup the state manually.
-func (m *Meta) StateRaw(opts *StateOpts) (*StateResult, error) {
-	result, err := State(opts)
-	if err != nil {
-		return nil, err
-	}
-
-	m.state = result.State
-	m.stateOutPath = result.StatePath
-	m.stateResult = result
-	return result, nil
-}
-
-// StateOpts returns the default state options
-func (m *Meta) StateOpts() *StateOpts {
-	localPath := m.statePath
-	if localPath == "" {
-		localPath = DefaultStateFilename
-	}
-	remotePath := filepath.Join(m.DataDir(), DefaultStateFilename)
-
-	return &StateOpts{
-		LocalPath:     localPath,
-		LocalPathOut:  m.stateOutPath,
-		RemotePath:    remotePath,
-		RemoteRefresh: true,
-		BackupPath:    m.backupPath,
-	}
 }
 
 // UIInput returns a UIInput object to be used for asking for input.
@@ -252,33 +255,29 @@ func (m *Meta) UIInput() terraform.UIInput {
 	}
 }
 
-// PersistState is used to write out the state, handling backup of
-// the existing state file and respecting path configurations.
-func (m *Meta) PersistState(s *terraform.State) error {
-	if err := m.state.WriteState(s); err != nil {
-		return err
+// StdinPiped returns true if the input is piped.
+func (m *Meta) StdinPiped() bool {
+	fi, err := wrappedstreams.Stdin().Stat()
+	if err != nil {
+		// If there is an error, let's just say its not piped
+		return false
 	}
 
-	return m.state.PersistState()
+	return fi.Mode()&os.ModeNamedPipe != 0
 }
 
-// Input returns true if we should ask for input for context.
-func (m *Meta) Input() bool {
-	return !test && m.input && len(m.variables) == 0
-}
+const (
+	ProviderSkipVerifyEnvVar = "TF_SKIP_PROVIDER_VERIFY"
+)
 
 // contextOpts returns the options to use to initialize a Terraform
 // context with the settings from this Meta.
 func (m *Meta) contextOpts() *terraform.ContextOpts {
-	var opts terraform.ContextOpts = *m.ContextOpts
-	opts.Hooks = make(
-		[]terraform.Hook,
-		len(m.ContextOpts.Hooks)+len(m.extraHooks)+1)
-	opts.Hooks[0] = m.uiHook()
-	copy(opts.Hooks[1:], m.ContextOpts.Hooks)
-	copy(opts.Hooks[len(m.ContextOpts.Hooks)+1:], m.extraHooks)
+	var opts terraform.ContextOpts
+	opts.Hooks = []terraform.Hook{m.uiHook(), &terraform.DebugHook{}}
+	opts.Hooks = append(opts.Hooks, m.ExtraHooks...)
 
-	vs := make(map[string]string)
+	vs := make(map[string]interface{})
 	for k, v := range opts.Variables {
 		vs[k] = v
 	}
@@ -289,8 +288,31 @@ func (m *Meta) contextOpts() *terraform.ContextOpts {
 		vs[k] = v
 	}
 	opts.Variables = vs
+
 	opts.Targets = m.targets
 	opts.UIInput = m.UIInput()
+	opts.Parallelism = m.parallelism
+	opts.Shadow = m.shadow
+
+	// If testingOverrides are set, we'll skip the plugin discovery process
+	// and just work with what we've been given, thus allowing the tests
+	// to provide mock providers and provisioners.
+	if m.testingOverrides != nil {
+		opts.ProviderResolver = m.testingOverrides.ProviderResolver
+		opts.Provisioners = m.testingOverrides.Provisioners
+	} else {
+		opts.ProviderResolver = m.providerResolver()
+		opts.Provisioners = m.provisionerFactories()
+	}
+
+	opts.ProviderSHA256s = m.providerPluginsLock().Read()
+	if v := os.Getenv(ProviderSkipVerifyEnvVar); v != "" {
+		opts.SkipProviderVerify = true
+	}
+
+	opts.Meta = &terraform.ContextMeta{
+		Env: m.Workspace(),
+	}
 
 	return &opts
 }
@@ -299,39 +321,64 @@ func (m *Meta) contextOpts() *terraform.ContextOpts {
 func (m *Meta) flagSet(n string) *flag.FlagSet {
 	f := flag.NewFlagSet(n, flag.ContinueOnError)
 	f.BoolVar(&m.input, "input", true, "input")
-	f.Var((*FlagKV)(&m.variables), "var", "variables")
-	f.Var((*FlagKVFile)(&m.variables), "var-file", "variable file")
+	f.Var((*variables.Flag)(&m.variables), "var", "variables")
+	f.Var((*variables.FlagFile)(&m.variables), "var-file", "variable file")
 	f.Var((*FlagStringSlice)(&m.targets), "target", "resource to target")
 
 	if m.autoKey != "" {
-		f.Var((*FlagKVFile)(&m.autoVariables), m.autoKey, "variable file")
+		f.Var((*variables.FlagFile)(&m.autoVariables), m.autoKey, "variable file")
 	}
+
+	// Advanced (don't need documentation, or unlikely to be set)
+	f.BoolVar(&m.shadow, "shadow", true, "shadow graph")
+
+	// Experimental features
+	experiment.Flag(f)
 
 	// Create an io.Writer that writes to our Ui properly for errors.
 	// This is kind of a hack, but it does the job. Basically: create
 	// a pipe, use a scanner to break it into lines, and output each line
 	// to the UI. Do this forever.
+
+	// If a previous pipe exists, we need to close that first.
+	// This should only happen in testing.
+	if m.errWriter != nil {
+		m.errWriter.Close()
+	}
+
+	if m.errScannerDone != nil {
+		<-m.errScannerDone
+	}
+
 	errR, errW := io.Pipe()
 	errScanner := bufio.NewScanner(errR)
+	m.errWriter = errW
+	m.errScannerDone = make(chan struct{})
 	go func() {
+		defer close(m.errScannerDone)
 		for errScanner.Scan() {
 			m.Ui.Error(errScanner.Text())
 		}
 	}()
 	f.SetOutput(errW)
 
+	// Set the default Usage to empty
+	f.Usage = func() {}
+
+	// command that bypass locking will supply their own flag on this var, but
+	// set the initial meta value to true as a failsafe.
+	m.stateLock = true
+
 	return f
 }
 
 // moduleStorage returns the module.Storage implementation used to store
 // modules for commands.
-func (m *Meta) moduleStorage(root string) module.Storage {
-	return &uiModuleStorage{
-		Storage: &module.FolderStorage{
-			StorageDir: filepath.Join(root, "modules"),
-		},
-		Ui: m.Ui,
-	}
+func (m *Meta) moduleStorage(root string, mode module.GetMode) *module.Storage {
+	s := module.NewStorage(filepath.Join(root, "modules"), m.Services, m.Credentials)
+	s.Ui = m.Ui
+	s.Mode = mode
+	return s
 }
 
 // process will process the meta-parameters out of the arguments. This
@@ -339,7 +386,7 @@ func (m *Meta) moduleStorage(root string) module.Storage {
 // slice.
 //
 // vars says whether or not we support variables.
-func (m *Meta) process(args []string, vars bool) []string {
+func (m *Meta) process(args []string, vars bool) ([]string, error) {
 	// We do this so that we retain the ability to technically call
 	// process multiple times, even if we have no plans to do so
 	if m.oldUi != nil {
@@ -372,24 +419,48 @@ func (m *Meta) process(args []string, vars bool) []string {
 	// the args...
 	m.autoKey = ""
 	if vars {
+		var preArgs []string
+
 		if _, err := os.Stat(DefaultVarsFilename); err == nil {
 			m.autoKey = "var-file-default"
-			args = append(args, "", "")
-			copy(args[2:], args[0:])
-			args[0] = "-" + m.autoKey
-			args[1] = DefaultVarsFilename
+			preArgs = append(preArgs, "-"+m.autoKey, DefaultVarsFilename)
 		}
 
 		if _, err := os.Stat(DefaultVarsFilename + ".json"); err == nil {
 			m.autoKey = "var-file-default"
-			args = append(args, "", "")
-			copy(args[2:], args[0:])
-			args[0] = "-" + m.autoKey
-			args[1] = DefaultVarsFilename + ".json"
+			preArgs = append(preArgs, "-"+m.autoKey, DefaultVarsFilename+".json")
 		}
+
+		wd, err := os.Getwd()
+		if err != nil {
+			return nil, err
+		}
+
+		fis, err := ioutil.ReadDir(wd)
+		if err != nil {
+			return nil, err
+		}
+
+		// make sure we add the files in order
+		sort.Slice(fis, func(i, j int) bool {
+			return fis[i].Name() < fis[j].Name()
+		})
+
+		for _, fi := range fis {
+			name := fi.Name()
+			// Ignore directories, non-var-files, and ignored files
+			if fi.IsDir() || !isAutoVarFile(name) || config.IsIgnoredFile(name) {
+				continue
+			}
+
+			m.autoKey = "var-file-default"
+			preArgs = append(preArgs, "-"+m.autoKey, name)
+		}
+
+		args = append(preArgs, args...)
 	}
 
-	return args
+	return args, nil
 }
 
 // uiHook returns the UiHook to use with the context.
@@ -400,13 +471,69 @@ func (m *Meta) uiHook() *UiHook {
 	}
 }
 
+// confirm asks a yes/no confirmation.
+func (m *Meta) confirm(opts *terraform.InputOpts) (bool, error) {
+	if !m.Input() {
+		return false, errors.New("input is disabled")
+	}
+	for {
+		v, err := m.UIInput().Input(opts)
+		if err != nil {
+			return false, fmt.Errorf(
+				"Error asking for confirmation: %s", err)
+		}
+
+		switch strings.ToLower(v) {
+		case "no":
+			return false, nil
+		case "yes":
+			return true, nil
+		}
+	}
+}
+
+// showDiagnostics displays error and warning messages in the UI.
+//
+// "Diagnostics" here means the Diagnostics type from the tfdiag package,
+// though as a convenience this function accepts anything that could be
+// passed to the "Append" method on that type, converting it to Diagnostics
+// before displaying it.
+//
+// Internally this function uses Diagnostics.Append, and so it will panic
+// if given unsupported value types, just as Append does.
+func (m *Meta) showDiagnostics(vals ...interface{}) {
+	var diags tfdiags.Diagnostics
+	diags = diags.Append(vals...)
+
+	for _, diag := range diags {
+		// TODO: Actually measure the terminal width and pass it here.
+		// For now, we don't have easy access to the writer that
+		// ui.Error (etc) are writing to and thus can't interrogate
+		// to see if it's a terminal and what size it is.
+		msg := format.Diagnostic(diag, m.Colorize(), 78)
+		switch diag.Severity() {
+		case tfdiags.Error:
+			m.Ui.Error(msg)
+		case tfdiags.Warning:
+			m.Ui.Warn(msg)
+		default:
+			m.Ui.Output(msg)
+		}
+	}
+}
+
 const (
-	// The name of the environment variable that can be used to set module depth.
+	// ModuleDepthDefault is the default value for
+	// module depth, which can be overridden by flag
+	// or env var
+	ModuleDepthDefault = -1
+
+	// ModuleDepthEnvVar is the name of the environment variable that can be used to set module depth.
 	ModuleDepthEnvVar = "TF_MODULE_DEPTH"
 )
 
 func (m *Meta) addModuleDepthFlag(flags *flag.FlagSet, moduleDepth *int) {
-	flags.IntVar(moduleDepth, "module-depth", 0, "module-depth")
+	flags.IntVar(moduleDepth, "module-depth", ModuleDepthDefault, "module-depth")
 	if envVar := os.Getenv(ModuleDepthEnvVar); envVar != "" {
 		if md, err := strconv.Atoi(envVar); err == nil {
 			*moduleDepth = md
@@ -414,20 +541,103 @@ func (m *Meta) addModuleDepthFlag(flags *flag.FlagSet, moduleDepth *int) {
 	}
 }
 
-// contextOpts are the options used to load a context from a command.
-type contextOpts struct {
-	// Path to the directory where the root module is.
-	Path string
+// outputShadowError outputs the error from ctx.ShadowError. If the
+// error is nil then nothing happens. If output is false then it isn't
+// outputted to the user (you can define logic to guard against outputting).
+func (m *Meta) outputShadowError(err error, output bool) bool {
+	// Do nothing if no error
+	if err == nil {
+		return false
+	}
 
-	// StatePath is the path to the state file. If this is empty, then
-	// no state will be loaded. It is also okay for this to be a path to
-	// a file that doesn't exist; it is assumed that this means that there
-	// is simply no state.
-	StatePath string
+	// If not outputting, do nothing
+	if !output {
+		return false
+	}
 
-	// GetMode is the module.GetMode to use when loading the module tree.
-	GetMode module.GetMode
+	// Write the shadow error output to a file
+	path := fmt.Sprintf("terraform-error-%d.log", time.Now().UTC().Unix())
+	if err := ioutil.WriteFile(path, []byte(err.Error()), 0644); err != nil {
+		// If there is an error writing it, just let it go
+		log.Printf("[ERROR] Error writing shadow error: %s", err)
+		return false
+	}
 
-	// Set to true when running a destroy plan/apply.
-	Destroy bool
+	// Output!
+	m.Ui.Output(m.Colorize().Color(fmt.Sprintf(
+		"[reset][bold][yellow]\nExperimental feature failure! Please report a bug.\n\n"+
+			"This is not an error. Your Terraform operation completed successfully.\n"+
+			"Your real infrastructure is unaffected by this message.\n\n"+
+			"[reset][yellow]While running, Terraform sometimes tests experimental features in the\n"+
+			"background. These features cannot affect real state and never touch\n"+
+			"real infrastructure. If the features work properly, you see nothing.\n"+
+			"If the features fail, this message appears.\n\n"+
+			"You can report an issue at: https://github.com/hashicorp/terraform/issues\n\n"+
+			"The failure was written to %q. Please\n"+
+			"double check this file contains no sensitive information and report\n"+
+			"it with your issue.\n\n"+
+			"This is not an error. Your terraform operation completed successfully\n"+
+			"and your real infrastructure is unaffected by this message.",
+		path,
+	)))
+
+	return true
+}
+
+// WorkspaceNameEnvVar is the name of the environment variable that can be used
+// to set the name of the Terraform workspace, overriding the workspace chosen
+// by `terraform workspace select`.
+//
+// Note that this environment variable is ignored by `terraform workspace new`
+// and `terraform workspace delete`.
+const WorkspaceNameEnvVar = "TF_WORKSPACE"
+
+// Workspace returns the name of the currently configured workspace, corresponding
+// to the desired named state.
+func (m *Meta) Workspace() string {
+	current, _ := m.WorkspaceOverridden()
+	return current
+}
+
+// WorkspaceOverridden returns the name of the currently configured workspace,
+// corresponding to the desired named state, as well as a bool saying whether
+// this was set via the TF_WORKSPACE environment variable.
+func (m *Meta) WorkspaceOverridden() (string, bool) {
+	if envVar := os.Getenv(WorkspaceNameEnvVar); envVar != "" {
+		return envVar, true
+	}
+
+	envData, err := ioutil.ReadFile(filepath.Join(m.DataDir(), local.DefaultWorkspaceFile))
+	current := string(bytes.TrimSpace(envData))
+	if current == "" {
+		current = backend.DefaultStateName
+	}
+
+	if err != nil && !os.IsNotExist(err) {
+		// always return the default if we can't get a workspace name
+		log.Printf("[ERROR] failed to read current workspace: %s", err)
+	}
+
+	return current, false
+}
+
+// SetWorkspace saves the given name as the current workspace in the local
+// filesystem.
+func (m *Meta) SetWorkspace(name string) error {
+	err := os.MkdirAll(m.DataDir(), 0755)
+	if err != nil {
+		return err
+	}
+
+	err = ioutil.WriteFile(filepath.Join(m.DataDir(), local.DefaultWorkspaceFile), []byte(name), 0644)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// isAutoVarFile determines if the file ends with .auto.tfvars or .auto.tfvars.json
+func isAutoVarFile(path string) bool {
+	return strings.HasSuffix(path, ".auto.tfvars") ||
+		strings.HasSuffix(path, ".auto.tfvars.json")
 }

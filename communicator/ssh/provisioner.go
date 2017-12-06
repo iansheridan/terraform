@@ -3,15 +3,15 @@ package ssh
 import (
 	"encoding/pem"
 	"fmt"
-	"io/ioutil"
 	"log"
 	"net"
 	"os"
 	"time"
 
+	"github.com/hashicorp/terraform/communicator/shared"
 	"github.com/hashicorp/terraform/terraform"
-	"github.com/mitchellh/go-homedir"
 	"github.com/mitchellh/mapstructure"
+	"github.com/xanzy/ssh-agent"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
@@ -32,12 +32,12 @@ const (
 )
 
 // connectionInfo is decoded from the ConnInfo of the resource. These are the
-// only keys we look at. If a KeyFile is given, that is used instead
+// only keys we look at. If a PrivateKey is given, that is used instead
 // of a password.
 type connectionInfo struct {
 	User       string
 	Password   string
-	KeyFile    string `mapstructure:"key_file"`
+	PrivateKey string `mapstructure:"private_key"`
 	Host       string
 	Port       int
 	Agent      bool
@@ -45,11 +45,11 @@ type connectionInfo struct {
 	ScriptPath string        `mapstructure:"script_path"`
 	TimeoutVal time.Duration `mapstructure:"-"`
 
-	BastionUser     string `mapstructure:"bastion_user"`
-	BastionPassword string `mapstructure:"bastion_password"`
-	BastionKeyFile  string `mapstructure:"bastion_key_file"`
-	BastionHost     string `mapstructure:"bastion_host"`
-	BastionPort     int    `mapstructure:"bastion_port"`
+	BastionUser       string `mapstructure:"bastion_user"`
+	BastionPassword   string `mapstructure:"bastion_password"`
+	BastionPrivateKey string `mapstructure:"bastion_private_key"`
+	BastionHost       string `mapstructure:"bastion_host"`
+	BastionPort       int    `mapstructure:"bastion_port"`
 }
 
 // parseConnectionInfo is used to convert the ConnInfo of the InstanceState into
@@ -80,6 +80,11 @@ func parseConnectionInfo(s *terraform.InstanceState) (*connectionInfo, error) {
 	if connInfo.User == "" {
 		connInfo.User = DefaultUser
 	}
+
+	// Format the host if needed.
+	// Needed for IPv6 support.
+	connInfo.Host = shared.IpFormat(connInfo.Host)
+
 	if connInfo.Port == 0 {
 		connInfo.Port = DefaultPort
 	}
@@ -94,14 +99,18 @@ func parseConnectionInfo(s *terraform.InstanceState) (*connectionInfo, error) {
 
 	// Default all bastion config attrs to their non-bastion counterparts
 	if connInfo.BastionHost != "" {
+		// Format the bastion host if needed.
+		// Needed for IPv6 support.
+		connInfo.BastionHost = shared.IpFormat(connInfo.BastionHost)
+
 		if connInfo.BastionUser == "" {
 			connInfo.BastionUser = connInfo.User
 		}
 		if connInfo.BastionPassword == "" {
 			connInfo.BastionPassword = connInfo.Password
 		}
-		if connInfo.BastionKeyFile == "" {
-			connInfo.BastionKeyFile = connInfo.KeyFile
+		if connInfo.BastionPrivateKey == "" {
+			connInfo.BastionPrivateKey = connInfo.PrivateKey
 		}
 		if connInfo.BastionPort == 0 {
 			connInfo.BastionPort = connInfo.Port
@@ -130,10 +139,10 @@ func prepareSSHConfig(connInfo *connectionInfo) (*sshConfig, error) {
 	}
 
 	sshConf, err := buildSSHClientConfig(sshClientConfigOpts{
-		user:     connInfo.User,
-		keyFile:  connInfo.KeyFile,
-		password: connInfo.Password,
-		sshAgent: sshAgent,
+		user:       connInfo.User,
+		privateKey: connInfo.PrivateKey,
+		password:   connInfo.Password,
+		sshAgent:   sshAgent,
 	})
 	if err != nil {
 		return nil, err
@@ -142,10 +151,10 @@ func prepareSSHConfig(connInfo *connectionInfo) (*sshConfig, error) {
 	var bastionConf *ssh.ClientConfig
 	if connInfo.BastionHost != "" {
 		bastionConf, err = buildSSHClientConfig(sshClientConfigOpts{
-			user:     connInfo.BastionUser,
-			keyFile:  connInfo.BastionKeyFile,
-			password: connInfo.BastionPassword,
-			sshAgent: sshAgent,
+			user:       connInfo.BastionUser,
+			privateKey: connInfo.BastionPrivateKey,
+			password:   connInfo.BastionPassword,
+			sshAgent:   sshAgent,
 		})
 		if err != nil {
 			return nil, err
@@ -169,10 +178,10 @@ func prepareSSHConfig(connInfo *connectionInfo) (*sshConfig, error) {
 }
 
 type sshClientConfigOpts struct {
-	keyFile  string
-	password string
-	sshAgent *sshAgent
-	user     string
+	privateKey string
+	password   string
+	sshAgent   *sshAgent
+	user       string
 }
 
 func buildSSHClientConfig(opts sshClientConfigOpts) (*ssh.ClientConfig, error) {
@@ -180,8 +189,8 @@ func buildSSHClientConfig(opts sshClientConfigOpts) (*ssh.ClientConfig, error) {
 		User: opts.user,
 	}
 
-	if opts.keyFile != "" {
-		pubKeyAuth, err := readPublicKeyFromPath(opts.keyFile)
+	if opts.privateKey != "" {
+		pubKeyAuth, err := readPrivateKey(opts.privateKey)
 		if err != nil {
 			return nil, err
 		}
@@ -201,31 +210,22 @@ func buildSSHClientConfig(opts sshClientConfigOpts) (*ssh.ClientConfig, error) {
 	return conf, nil
 }
 
-func readPublicKeyFromPath(path string) (ssh.AuthMethod, error) {
-	fullPath, err := homedir.Expand(path)
-	if err != nil {
-		return nil, fmt.Errorf("Failed to expand home directory: %s", err)
-	}
-	key, err := ioutil.ReadFile(fullPath)
-	if err != nil {
-		return nil, fmt.Errorf("Failed to read key file %q: %s", path, err)
-	}
-
+func readPrivateKey(pk string) (ssh.AuthMethod, error) {
 	// We parse the private key on our own first so that we can
 	// show a nicer error if the private key has a password.
-	block, _ := pem.Decode(key)
+	block, _ := pem.Decode([]byte(pk))
 	if block == nil {
-		return nil, fmt.Errorf("Failed to read key %q: no key found", path)
+		return nil, fmt.Errorf("Failed to read key %q: no key found", pk)
 	}
 	if block.Headers["Proc-Type"] == "4,ENCRYPTED" {
 		return nil, fmt.Errorf(
 			"Failed to read key %q: password protected keys are\n"+
-				"not supported. Please decrypt the key prior to use.", path)
+				"not supported. Please decrypt the key prior to use.", pk)
 	}
 
-	signer, err := ssh.ParsePrivateKey(key)
+	signer, err := ssh.ParsePrivateKey([]byte(pk))
 	if err != nil {
-		return nil, fmt.Errorf("Failed to parse key file %q: %s", path, err)
+		return nil, fmt.Errorf("Failed to parse key file %q: %s", pk, err)
 	}
 
 	return ssh.PublicKeys(signer), nil
@@ -237,22 +237,17 @@ func connectToAgent(connInfo *connectionInfo) (*sshAgent, error) {
 		return nil, nil
 	}
 
-	sshAuthSock := os.Getenv("SSH_AUTH_SOCK")
-
-	if sshAuthSock == "" {
-		return nil, fmt.Errorf("SSH Requested but SSH_AUTH_SOCK not-specified")
-	}
-
-	conn, err := net.Dial("unix", sshAuthSock)
+	agent, conn, err := sshagent.New()
 	if err != nil {
-		return nil, fmt.Errorf("Error connecting to SSH_AUTH_SOCK: %v", err)
+		return nil, err
 	}
 
 	// connection close is handled over in Communicator
 	return &sshAgent{
-		agent: agent.NewClient(conn),
+		agent: agent,
 		conn:  conn,
 	}, nil
+
 }
 
 // A tiny wrapper around an agent.Agent to expose the ability to close its
@@ -263,6 +258,10 @@ type sshAgent struct {
 }
 
 func (a *sshAgent) Close() error {
+	if a.conn == nil {
+		return nil
+	}
+
 	return a.conn.Close()
 }
 

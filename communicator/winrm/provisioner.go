@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hashicorp/terraform/communicator/shared"
 	"github.com/hashicorp/terraform/terraform"
 	"github.com/mitchellh/mapstructure"
 )
@@ -36,7 +37,7 @@ type connectionInfo struct {
 	Port       int
 	HTTPS      bool
 	Insecure   bool
-	CACert     *[]byte `mapstructure:"ca_cert"`
+	CACert     string `mapstructure:"cacert"`
 	Timeout    string
 	ScriptPath string        `mapstructure:"script_path"`
 	TimeoutVal time.Duration `mapstructure:"-"`
@@ -72,6 +73,11 @@ func parseConnectionInfo(s *terraform.InstanceState) (*connectionInfo, error) {
 	if connInfo.User == "" {
 		connInfo.User = DefaultUser
 	}
+
+	// Format the host if needed.
+	// Needed for IPv6 support.
+	connInfo.Host = shared.IpFormat(connInfo.Host)
+
 	if connInfo.Port == 0 {
 		connInfo.Port = DefaultPort
 	}
@@ -99,7 +105,7 @@ func safeDuration(dur string, defaultDur time.Duration) time.Duration {
 
 func formatDuration(duration time.Duration) string {
 	h := int(duration.Hours())
-	m := int(duration.Minutes()) - (h * 60)
+	m := int(duration.Minutes()) - h*60
 	s := int(duration.Seconds()) - (h*3600 + m*60)
 
 	res := "PT"

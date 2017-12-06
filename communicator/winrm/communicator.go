@@ -7,11 +7,12 @@ import (
 	"math/rand"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hashicorp/terraform/communicator/remote"
 	"github.com/hashicorp/terraform/terraform"
-	"github.com/masterzen/winrm/winrm"
+	"github.com/masterzen/winrm"
 	"github.com/packer-community/winrmcp/winrmcp"
 
 	// This import is a bit strange, but it's needed so `make updatedeps` can see and download it
@@ -23,6 +24,7 @@ type Communicator struct {
 	connInfo *connectionInfo
 	client   *winrm.Client
 	endpoint *winrm.Endpoint
+	rand     *rand.Rand
 }
 
 // New creates a new communicator implementation over WinRM.
@@ -37,12 +39,16 @@ func New(s *terraform.InstanceState) (*Communicator, error) {
 		Port:     connInfo.Port,
 		HTTPS:    connInfo.HTTPS,
 		Insecure: connInfo.Insecure,
-		CACert:   connInfo.CACert,
+	}
+	if len(connInfo.CACert) > 0 {
+		endpoint.CACert = []byte(connInfo.CACert)
 	}
 
 	comm := &Communicator{
 		connInfo: connInfo,
 		endpoint: endpoint,
+		// Seed our own rand source so that script paths are not deterministic
+		rand: rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 
 	return comm, nil
@@ -54,7 +60,7 @@ func (c *Communicator) Connect(o terraform.UIOutput) error {
 		return nil
 	}
 
-	params := winrm.DefaultParameters()
+	params := winrm.DefaultParameters
 	params.Timeout = formatDuration(c.Timeout())
 
 	client, err := winrm.NewClientWithParameters(
@@ -79,7 +85,7 @@ func (c *Communicator) Connect(o terraform.UIOutput) error {
 			c.connInfo.Password != "",
 			c.connInfo.HTTPS,
 			c.connInfo.Insecure,
-			c.connInfo.CACert != nil,
+			c.connInfo.CACert != "",
 		))
 	}
 
@@ -120,7 +126,7 @@ func (c *Communicator) Timeout() time.Duration {
 func (c *Communicator) ScriptPath() string {
 	return strings.Replace(
 		c.connInfo.ScriptPath, "%RAND%",
-		strconv.FormatInt(int64(rand.Int31()), 10), -1)
+		strconv.FormatInt(int64(c.rand.Int31()), 10), -1)
 }
 
 // Start implementation of communicator.Communicator interface
@@ -148,10 +154,20 @@ func (c *Communicator) Start(rc *remote.Cmd) error {
 func runCommand(shell *winrm.Shell, cmd *winrm.Command, rc *remote.Cmd) {
 	defer shell.Close()
 
-	go io.Copy(rc.Stdout, cmd.Stdout)
-	go io.Copy(rc.Stderr, cmd.Stderr)
+	var wg sync.WaitGroup
+	go func() {
+		wg.Add(1)
+		io.Copy(rc.Stdout, cmd.Stdout)
+		wg.Done()
+	}()
+	go func() {
+		wg.Add(1)
+		io.Copy(rc.Stderr, cmd.Stderr)
+		wg.Done()
+	}()
 
 	cmd.Wait()
+	wg.Wait()
 	rc.SetExited(cmd.ExitCode())
 }
 
@@ -182,12 +198,21 @@ func (c *Communicator) UploadDir(dst string, src string) error {
 
 func (c *Communicator) newCopyClient() (*winrmcp.Winrmcp, error) {
 	addr := fmt.Sprintf("%s:%d", c.endpoint.Host, c.endpoint.Port)
-	return winrmcp.New(addr, &winrmcp.Config{
+
+	config := winrmcp.Config{
 		Auth: winrmcp.Auth{
 			User:     c.connInfo.User,
 			Password: c.connInfo.Password,
 		},
+		Https:                 c.connInfo.HTTPS,
+		Insecure:              c.connInfo.Insecure,
 		OperationTimeout:      c.Timeout(),
 		MaxOperationsPerShell: 15, // lowest common denominator
-	})
+	}
+
+	if c.connInfo.CACert != "" {
+		config.CACertBytes = []byte(c.connInfo.CACert)
+	}
+
+	return winrmcp.New(addr, &config)
 }

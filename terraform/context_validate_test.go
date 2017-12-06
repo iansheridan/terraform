@@ -6,22 +6,72 @@ import (
 	"testing"
 )
 
+func TestContext2Validate_badCount(t *testing.T) {
+	p := testProvider("aws")
+	m := testModule(t, "validate-bad-count")
+	c := testContext2(t, &ContextOpts{
+		Module: m,
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+	})
+
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
+	}
+}
+
 func TestContext2Validate_badVar(t *testing.T) {
 	p := testProvider("aws")
 	m := testModule(t, "validate-bad-var")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+	})
+
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
+	}
+}
+
+func TestContext2Validate_varMapOverrideOld(t *testing.T) {
+	m := testModule(t, "validate-module-pc-vars")
+	p := testProvider("aws")
+	c := testContext2(t, &ContextOpts{
+		Module: m,
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+		Variables: map[string]interface{}{
+			"foo.foo": "bar",
 		},
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %#v", e)
+}
+
+func TestContext2Validate_varNoDefaultExplicitType(t *testing.T) {
+	m := testModule(t, "validate-var-no-default-explicit-type")
+	c := testContext2(t, &ContextOpts{
+		Module: m,
+	})
+
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -30,10 +80,12 @@ func TestContext2Validate_computedVar(t *testing.T) {
 	m := testModule(t, "validate-computed-var")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws":  testProviderFuncFixed(p),
-			"test": testProviderFuncFixed(testProvider("test")),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws":  testProviderFuncFixed(p),
+				"test": testProviderFuncFixed(testProvider("test")),
+			},
+		),
 	})
 
 	p.ValidateFn = func(c *ResourceConfig) ([]string, []error) {
@@ -48,12 +100,30 @@ func TestContext2Validate_computedVar(t *testing.T) {
 		return fmt.Errorf("Configure should not be called for provider")
 	}
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %#v", e)
+}
+
+// Test that validate allows through computed counts. We do this and allow
+// them to fail during "plan" since we can't know if the computed values
+// can be realized during a plan.
+func TestContext2Validate_countComputed(t *testing.T) {
+	p := testProvider("aws")
+	m := testModule(t, "validate-count-computed")
+	c := testContext2(t, &ContextOpts{
+		Module: m,
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+	})
+
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -62,17 +132,16 @@ func TestContext2Validate_countNegative(t *testing.T) {
 	m := testModule(t, "validate-count-negative")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %#v", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -81,17 +150,16 @@ func TestContext2Validate_countVariable(t *testing.T) {
 	m := testModule(t, "apply-count-variable")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %s", e)
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -100,17 +168,16 @@ func TestContext2Validate_countVariableNoDefault(t *testing.T) {
 	m := testModule(t, "validate-count-variable")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) != 1 {
-		t.Fatalf("bad: %s", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -121,17 +188,16 @@ func TestContext2Validate_cycle(t *testing.T) {
 	m := testModule(t, "validate-cycle")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("expected no warns, got: %#v", w)
-	}
-	if len(e) != 1 {
-		t.Fatalf("expected 1 err, got: %s", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 */
@@ -141,17 +207,16 @@ func TestContext2Validate_moduleBadOutput(t *testing.T) {
 	m := testModule(t, "validate-bad-module-output")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %s", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -160,17 +225,16 @@ func TestContext2Validate_moduleGood(t *testing.T) {
 	m := testModule(t, "validate-good-module")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %#v", e)
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -179,19 +243,18 @@ func TestContext2Validate_moduleBadResource(t *testing.T) {
 	p := testProvider("aws")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
 	p.ValidateResourceReturnErrors = []error{fmt.Errorf("bad")}
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %#v", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -200,41 +263,16 @@ func TestContext2Validate_moduleDepsShouldNotCycle(t *testing.T) {
 	p := testProvider("aws")
 	ctx := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := ctx.Validate()
-
-	if len(w) > 0 {
-		t.Fatalf("expected no warnings, got: %s", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("expected no errors, got: %s", e)
-	}
-}
-
-func TestContext2Validate_moduleProviderInherit(t *testing.T) {
-	m := testModule(t, "validate-module-pc-inherit")
-	p := testProvider("aws")
-	c := testContext2(t, &ContextOpts{
-		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
-	})
-
-	p.ValidateFn = func(c *ResourceConfig) ([]string, []error) {
-		return nil, c.CheckSet([]string{"set"})
-	}
-
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %s", e)
+	diags := ctx.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -243,9 +281,11 @@ func TestContext2Validate_moduleProviderInheritOrphan(t *testing.T) {
 	p := testProvider("aws")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 		State: &State{
 			Modules: []*ModuleState{
 				&ModuleState{
@@ -275,12 +315,9 @@ func TestContext2Validate_moduleProviderInheritOrphan(t *testing.T) {
 		return nil, nil
 	}
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %s", e)
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -289,10 +326,12 @@ func TestContext2Validate_moduleProviderVar(t *testing.T) {
 	p := testProvider("aws")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
-		Variables: map[string]string{
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+		Variables: map[string]interface{}{
 			"provider_var": "bar",
 		},
 	})
@@ -301,12 +340,9 @@ func TestContext2Validate_moduleProviderVar(t *testing.T) {
 		return nil, c.CheckSet([]string{"foo"})
 	}
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %s", e)
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -315,21 +351,20 @@ func TestContext2Validate_moduleProviderInheritUnused(t *testing.T) {
 	p := testProvider("aws")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
 	p.ValidateFn = func(c *ResourceConfig) ([]string, []error) {
 		return nil, c.CheckSet([]string{"foo"})
 	}
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %s", e)
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -353,9 +388,11 @@ func TestContext2Validate_orphans(t *testing.T) {
 	}
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 		State: state,
 	})
 
@@ -364,12 +401,9 @@ func TestContext2Validate_orphans(t *testing.T) {
 		return nil, c.CheckSet([]string{"foo"})
 	}
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %s", e)
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -378,22 +412,21 @@ func TestContext2Validate_providerConfig_bad(t *testing.T) {
 	p := testProvider("aws")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
 	p.ValidateReturnErrors = []error{fmt.Errorf("bad")}
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
+	diags := c.Validate()
+	if len(diags) != 1 {
+		t.Fatalf("wrong number of diagnostics %d; want %d", len(diags), 1)
 	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %s", e)
-	}
-	if !strings.Contains(fmt.Sprintf("%s", e), "bad") {
-		t.Fatalf("bad: %s", e)
+	if !strings.Contains(diags.Err().Error(), "bad") {
+		t.Fatalf("bad: %s", diags.Err().Error())
 	}
 }
 
@@ -402,19 +435,18 @@ func TestContext2Validate_providerConfig_badEmpty(t *testing.T) {
 	p := testProvider("aws")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
 	p.ValidateReturnErrors = []error{fmt.Errorf("bad")}
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %#v", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -423,17 +455,16 @@ func TestContext2Validate_providerConfig_good(t *testing.T) {
 	p := testProvider("aws")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %#v", e)
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -443,9 +474,11 @@ func TestContext2Validate_provisionerConfig_bad(t *testing.T) {
 	pr := testProvisioner()
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 		Provisioners: map[string]ResourceProvisionerFactory{
 			"shell": testProvisionerFuncFixed(pr),
 		},
@@ -453,12 +486,9 @@ func TestContext2Validate_provisionerConfig_bad(t *testing.T) {
 
 	pr.ValidateReturnErrors = []error{fmt.Errorf("bad")}
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %#v", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -474,20 +504,19 @@ func TestContext2Validate_provisionerConfig_good(t *testing.T) {
 	}
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 		Provisioners: map[string]ResourceProvisionerFactory{
 			"shell": testProvisionerFuncFixed(pr),
 		},
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %#v", e)
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -496,17 +525,16 @@ func TestContext2Validate_requiredVar(t *testing.T) {
 	p := testProvider("aws")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %s", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -515,19 +543,18 @@ func TestContext2Validate_resourceConfig_bad(t *testing.T) {
 	p := testProvider("aws")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
 	p.ValidateResourceReturnErrors = []error{fmt.Errorf("bad")}
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %s", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -536,17 +563,16 @@ func TestContext2Validate_resourceConfig_good(t *testing.T) {
 	p := testProvider("aws")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %#v", e)
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -555,17 +581,16 @@ func TestContext2Validate_resourceNameSymbol(t *testing.T) {
 	m := testModule(t, "validate-resource-name-symbol")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) == 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %s", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -574,17 +599,16 @@ func TestContext2Validate_selfRef(t *testing.T) {
 	m := testModule(t, "validate-self-ref")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %s", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -593,17 +617,16 @@ func TestContext2Validate_selfRefMulti(t *testing.T) {
 	m := testModule(t, "validate-self-ref-multi")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %#v", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -612,17 +635,16 @@ func TestContext2Validate_selfRefMultiAll(t *testing.T) {
 	m := testModule(t, "validate-self-ref-multi-all")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 	})
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) == 0 {
-		t.Fatalf("bad: %#v", e)
+	diags := c.Validate()
+	if !diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -636,10 +658,9 @@ func TestContext2Validate_tainted(t *testing.T) {
 				Resources: map[string]*ResourceState{
 					"aws_instance.foo": &ResourceState{
 						Type: "aws_instance",
-						Tainted: []*InstanceState{
-							&InstanceState{
-								ID: "bar",
-							},
+						Primary: &InstanceState{
+							ID:      "bar",
+							Tainted: true,
 						},
 					},
 				},
@@ -648,9 +669,11 @@ func TestContext2Validate_tainted(t *testing.T) {
 	}
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 		State: state,
 	})
 
@@ -659,12 +682,9 @@ func TestContext2Validate_tainted(t *testing.T) {
 		return nil, c.CheckSet([]string{"foo"})
 	}
 
-	w, e := c.Validate()
-	if len(w) > 0 {
-		t.Fatalf("bad: %#v", w)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %#v", e)
+	diags := c.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -676,9 +696,11 @@ func TestContext2Validate_targetedDestroy(t *testing.T) {
 	p.DiffFn = testDiffFn
 	ctx := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
 		Provisioners: map[string]ResourceProvisionerFactory{
 			"shell": testProvisionerFuncFixed(pr),
 		},
@@ -697,16 +719,9 @@ func TestContext2Validate_targetedDestroy(t *testing.T) {
 		Destroy: true,
 	})
 
-	w, e := ctx.Validate()
-	if len(w) > 0 {
-		warnStr := ""
-		for _, v := range w {
-			warnStr = warnStr + " " + v
-		}
-		t.Fatalf("bad: %s", warnStr)
-	}
-	if len(e) > 0 {
-		t.Fatalf("bad: %s", e)
+	diags := ctx.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
 	}
 }
 
@@ -715,10 +730,12 @@ func TestContext2Validate_varRefFilled(t *testing.T) {
 	p := testProvider("aws")
 	c := testContext2(t, &ContextOpts{
 		Module: m,
-		Providers: map[string]ResourceProviderFactory{
-			"aws": testProviderFuncFixed(p),
-		},
-		Variables: map[string]string{
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+		Variables: map[string]interface{}{
 			"foo": "bar",
 		},
 	})
@@ -732,5 +749,130 @@ func TestContext2Validate_varRefFilled(t *testing.T) {
 	c.Validate()
 	if value != "bar" {
 		t.Fatalf("bad: %#v", value)
+	}
+}
+
+// Module variables weren't being interpolated during Validate phase.
+// related to https://github.com/hashicorp/terraform/issues/5322
+func TestContext2Validate_interpolateVar(t *testing.T) {
+	input := new(MockUIInput)
+
+	m := testModule(t, "input-interpolate-var")
+	p := testProvider("null")
+	p.ApplyFn = testApplyFn
+	p.DiffFn = testDiffFn
+
+	ctx := testContext2(t, &ContextOpts{
+		Module: m,
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"template": testProviderFuncFixed(p),
+			},
+		),
+		UIInput: input,
+	})
+
+	diags := ctx.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
+	}
+}
+
+// When module vars reference something that is actually computed, this
+// shouldn't cause validation to fail.
+func TestContext2Validate_interpolateComputedModuleVarDef(t *testing.T) {
+	input := new(MockUIInput)
+
+	m := testModule(t, "validate-computed-module-var-ref")
+	p := testProvider("aws")
+	p.ApplyFn = testApplyFn
+	p.DiffFn = testDiffFn
+
+	ctx := testContext2(t, &ContextOpts{
+		Module: m,
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+		UIInput: input,
+	})
+
+	diags := ctx.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
+	}
+}
+
+// Computed values are lost when a map is output from a module
+func TestContext2Validate_interpolateMap(t *testing.T) {
+	input := new(MockUIInput)
+
+	m := testModule(t, "issue-9549")
+	p := testProvider("null")
+	p.ApplyFn = testApplyFn
+	p.DiffFn = testDiffFn
+
+	ctx := testContext2(t, &ContextOpts{
+		Module: m,
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"template": testProviderFuncFixed(p),
+			},
+		),
+		UIInput: input,
+	})
+
+	diags := ctx.Validate()
+	if diags.HasErrors() {
+		t.Fatalf("bad: %#v", diags)
+	}
+}
+
+// Manually validate using the new PlanGraphBuilder
+func TestContext2Validate_PlanGraphBuilder(t *testing.T) {
+	m := testModule(t, "apply-vars")
+	p := testProvider("aws")
+	p.ApplyFn = testApplyFn
+	p.DiffFn = testDiffFn
+	c := testContext2(t, &ContextOpts{
+		Module: m,
+		ProviderResolver: ResourceProviderResolverFixed(
+			map[string]ResourceProviderFactory{
+				"aws": testProviderFuncFixed(p),
+			},
+		),
+		Variables: map[string]interface{}{
+			"foo":       "us-west-2",
+			"test_list": []interface{}{"Hello", "World"},
+			"test_map": map[string]interface{}{
+				"Hello": "World",
+				"Foo":   "Bar",
+				"Baz":   "Foo",
+			},
+			"amis": []map[string]interface{}{
+				map[string]interface{}{
+					"us-east-1": "override",
+				},
+			},
+		},
+	})
+
+	graph, err := (&PlanGraphBuilder{
+		Module:    c.module,
+		State:     NewState(),
+		Providers: c.components.ResourceProviders(),
+		Targets:   c.targets,
+	}).Build(RootModulePath)
+	if err != nil {
+		t.Fatalf("error attmepting to Build PlanGraphBuilder: %s", err)
+	}
+	defer c.acquireRun("validate-test")()
+	walker, err := c.walk(graph, walkValidate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(walker.ValidationErrors) > 0 {
+		t.Fatal(walker.ValidationErrors)
 	}
 }

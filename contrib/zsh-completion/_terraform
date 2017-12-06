@@ -27,7 +27,7 @@ __apply() {
         '-state=[(path) Path to read and save state (unless state-out is specified). Defaults to "terraform.tfstate".]' \
         '-state-out=[(path) Path to write state to that is different than "-state". This can be used to preserve the old state.]' \
         '-var[("foo=bar") Set a variable in the Terraform configuration. This flag can be set multiple times.]' \
-        '-var-file=[(path) Set variables in the Terraform configuration from a file. If "terraform.tfvars" is present, it will be automatically loaded if this flag is not specified.]'
+        '-var-file=[(path) Set variables in the Terraform configuration from a file. If "terraform.tfvars" or any ".auto.tfvars" files are present, they will be automatically loaded.]'
 }
 
 __destroy() {
@@ -39,7 +39,7 @@ __destroy() {
         '-state=[Path to read and save state (unless state-out is specified). Defaults to "terraform.tfstate".]' \
         '-state-out=[Path to write state to that is different than "-state". This can be used to preserve the old state.]' \
         '-var[("foo=bar") Set a variable in the Terraform configuration. This flag can be set multiple times.]' \
-        '-var-file=[(path) Set variables in the Terraform configuration from a file. If "terraform.tfvars" is present, it will be automatically loaded if this flag is not specified.]'
+        '-var-file=[(path) Set variables in the Terraform configuration from a file. If "terraform.tfvars" or any ".auto.tfvars" files are present, they will be automatically loaded.]'
 }
 
 __get() {
@@ -49,7 +49,7 @@ __get() {
 
 __graph() {
     _arguments \
-        '-module-depth=[(n) The maximum depth to expand modules. By default this is zero, which will not expand modules at all.]'
+        '-module-depth=[(n) The maximum depth to expand modules. By default this is -1, which will expand all modules.]'
 }
 
 __init() {
@@ -71,13 +71,13 @@ __plan() {
         '-backup=[(path) Path to backup the existing state file before modifying. Defaults to the "-state-out" path with" .backup" extension. Set to "-" to disable backup.]' \
         '-destroy[If set, a plan will be generated to destroy all resources managed by the given configuration and state.]' \
         '-input=[(true) Ask for input for variables if not directly set.]' \
-        '-module-depth=[(n) Specifies the depth of modules to show in the output. This does not affect the plan itself, only the output shown. By default, this is zero. -1 will expand all.]' \
+        '-module-depth=[(n) Specifies the depth of modules to show in the output. This does not affect the plan itself, only the output shown. By default, this is -1, which will expand all.]' \
         '-no-color[If specified, output will not contain any color.]' \
         '-out=[(path) Write a plan file to the given path. This can be used as input to the "apply" command.]' \
         '-refresh=[(true) Update state prior to checking for differences.]' \
         '-state=[(statefile) Path to a Terraform state file to use to look up Terraform-managed resources. By default it will use the state "terraform.tfstate" if it exists.]' \
         '-var[("foo=bar") Set a variable in the Terraform configuration. This flag can be set multiple times.]' \
-        '-var-file=[(path) Set variables in the Terraform configuration from a file. If "terraform.tfvars" is present, it will be automatically loaded if this flag is not specified.]'
+        '-var-file=[(path) Set variables in the Terraform configuration from a file. If "terraform.tfvars" or any ".auto.tfvars" files are present, they will be automatically loaded.]'
 }
 
 __push() {
@@ -93,7 +93,7 @@ __refresh() {
         '-state=[(path) Path to read and save state (unless state-out is specified). Defaults to "terraform.tfstate".]' \
         '-state-out=[(path) Path to write state to that is different than "-state". This can be used to preserve the old state.]' \
         '-var[("foo=bar") Set a variable in the Terraform configuration. This flag can be set multiple times.]' \
-        '-var-file=[(path) Set variables in the Terraform configuration from a file. If "terraform.tfvars" is present, it will be automatically loaded if this flag is not specified.]'
+        '-var-file=[(path) Set variables in the Terraform configuration from a file. If "terraform.tfvars" or any ".auto.tfvars" files are present, they will be automatically loaded.]'
 }
 
 __taint() {
@@ -121,7 +121,7 @@ __remote() {
 
 __show() {
     _arguments \
-        '-module-depth=[(n) The maximum depth to expand modules. By default this is zero, which will not expand modules at all.]' \
+        '-module-depth=[(n) The maximum depth to expand modules. By default this is -1, which will expand all modules.]' \
         '-no-color[If specified, output will not contain any color.]'
 }
 
